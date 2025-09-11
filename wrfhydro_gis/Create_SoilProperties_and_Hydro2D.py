@@ -115,12 +115,6 @@ fillValue = -9999.0
 soilParamFile = 'SOILPARM.TBL'
 mpParamFile = 'MPTABLE.TBL'
 genParamFile = 'GENPARM.TBL'
-if landClass == "USGS":
-    hydParamFile = 'HYDRO.TBL'
-    mp_params = 'noahmp_usgs_parameters'
-elif landClass == "MODIS":
-    hydParamFile = 'HYDRO_MODIS.TBL'
-    mp_params = 'noahmp_modis_parameters'
 
 # Map variable names from netCDF (lower case, keys) to parameter column headings
 # from .TBL files (upper case, values)
@@ -469,6 +463,14 @@ def main_soilProp(geoFile,
         {hyd2dFile}  - 2-Dimensional hydro parameter file (netCDF)
     '''
     tic1 = time.time()
+
+    # Hydrology parameter file and heading in mptable based on LC scheme
+    if landClass == "USGS":
+        hydParamFile = 'HYDRO.TBL'
+        mp_params = 'noahmp_usgs_parameters'
+    elif landClass == "MODIS":
+        hydParamFile = 'HYDRO_MODIS.TBL'
+        mp_params = 'noahmp_modis_parameters'
 
     # Setup input and output files
     slpropF = os.path.join(outDir, slpropFile)
