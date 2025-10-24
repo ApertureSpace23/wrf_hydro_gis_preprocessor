@@ -1971,9 +1971,9 @@ def WB_functions(rootgrp, indem, projdir, threshold, ovroughrtfac_val, retdeprtf
     # Workflow options
     Full_Workflow = False                               # Use the Flow Accumulation Full Workflow tool (fewer options)
     default_Method = False                               # Fill Depressions (Planchon and Darboux), no z-Limit functionality
-    fill_deps = True                                    # Option to Fill Depressions with z_limit
+    fill_deps = False                                    # Option to Fill Depressions with z_limit
     breach_deps = False                                 # Option to Breach Depressions
-    breach_deps_LC = False                              # Option to use Breach Depressions (Least Cost)
+    breach_deps_LC = True                              # Option to use Breach Depressions (Least Cost)
     zero_background_stream_order = True                 # 2021/09/24 Adding option for specifying zero-background as output of stream order tools
     fill_depth_raster = False                           # 2022/10/05 - For diagnostics, we can opt to create a grid of fill depths.
 
@@ -4344,4 +4344,5 @@ def obtain_LakeParameters(in_NC, subsetList=None):
 
 # --- Main Codeblock --- #
 if __name__ == '__main__':
+
     pass
