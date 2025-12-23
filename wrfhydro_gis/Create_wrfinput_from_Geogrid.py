@@ -335,17 +335,20 @@ def fill_wrfinput_xarray(ds_in, laimo=8):
         print('    Replaced {0} values in ISLTYP with {1} because of a land landcover type and water soil class'.format(fillsoiltyp, numpy.logical_and(use!=iswater, soi==isoilwater).sum()))
     del dominant_index, use
 
+   # Calculate the depths of the center depth of each soil layer based on the
+    # layer thicknesses provided in the header. Default is zs = [0.05, 0.25, 0.7, 1.5]
+    if len(dzs) != nsoil:
+        raise ValueError(f"Number of soils in {dzs=} ({len(dzs)=}) does not match {nsoil=}")
+    
+    zs = [item/2 + sum(dzs[:num]) for num,item in enumerate(dzs)]               # Each center depth is half the layer thickness + sum of thicknesses of all levels above
+
     # Soil moisture SMOIS 3D array
-    smoisArr = numpy.array([0.20, 0.21, 0.25, 0.27])                            # Constant soil moisture with increasing depth by vertical level
+    smoisArr = numpy.array(zs)*0.05+0.1975                            # Constant soil moisture with increasing depth by vertical level
     smois = smoisArr[:, None, None] * numpy.ones(msk.shape)                     # Set the soil moisture (SMOIS) array across entire domain by vertical level
 
     # TSLB 3D array
-    tslbArr = numpy.array([285.0, 283.0, 279.0, 277.0])                         # Constant tslb with increasing depth by vertical level
+    tslbArr = numpy.array(zs)*-5.52 + 285.275        # Constant tslb with increasing depth by vertical level
     tslb = tslbArr[:, None, None] * numpy.ones(msk.shape)                       # Set the TSLB array across entire domain by vertical level. tslb = numpy.vstack([msk]*4)
-
-    # Calculate the depths of the center depth of each soil layer based on the
-    # layer thicknesses provided in the header. Default is zs = [0.05, 0.25, 0.7, 1.5]
-    zs = [item/2 + sum(dzs[:num]) for num,item in enumerate(dzs)]               # Each center depth is half the layer thickness + sum of thicknesses of all levels above
 
     veg = ds_in['GREENFRAC'].data * 100.0                               # Green fraction as a percentage (0-100)
 
