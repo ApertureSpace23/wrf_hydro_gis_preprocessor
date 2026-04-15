@@ -345,7 +345,7 @@ def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
     # Soil moisture SMOIS 3D array
     smoisArr = numpy.array(zs)*0.05+0.1975  # Constant soil moisture with increasing depth by vertical level
     ic = initial_conditions
-    if ic and ic.get('sm_surface') and ic.get('sm_rootzone'):
+    if ic and ic.get('sm_surface') is not None and ic.get('sm_rootzone') is not None:
         smoisArr[0] = initial_conditions['sm_surface']
         smoisArr[1:] = initial_conditions['sm_rootzone']
     smois = smoisArr[:, None, None] * numpy.ones(msk.shape)  # Set the soil moisture (SMOIS) array across entire domain by vertical level
@@ -355,7 +355,7 @@ def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
     if ic and (st := ic.get('surface_temp')) and ic.get("soil_temp_layer5") and (ic_layer_centers := ic.get('centers')):
         temps = [ic.get(f'soil_temp_layer{i}') for i in range(1,6)]
         if not all(temps):
-            raise ValueError(f"Missing a soil temperature layer {temps=}")
+            raise ValueError(f"Missing a soil temperature layer or one is 0K {temps=}")
         temps = [st, *temps]
         tslbArr = numpy.interp(zs, ic_layer_centers, temps)
     tslb = tslbArr[:, None, None] * numpy.ones(msk.shape)                       # Set the TSLB array across entire domain by vertical level. tslb = numpy.vstack([msk]*4)
@@ -372,7 +372,7 @@ def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
     ds_in.variables['LAI'][:] = ds_in.variables['LAI12M'][:,laimo-1] # Leaf area index for the user-specified month
     ds_in.variables['CANWAT'][:] = numpy.zeros(msk.shape)                 # Canopy water storage kg/m^2
     ds_in.variables['SNOW'][:] = numpy.zeros(msk.shape)                   # snow water equivelant kg/m^2
-    if ic and ic.get("snow_mass"):
+    if ic and ic.get("snow_mass") is not None:
         ds_in.variables['SNOW'][:] = numpy.ones(msk.shape) * ic.get("snow_mass")
     ds_in.variables['TSK'][:] = numpy.zeros(msk.shape) + 290.0            # Initial land temp K
     if ic and ic.get('surface_temp'):
