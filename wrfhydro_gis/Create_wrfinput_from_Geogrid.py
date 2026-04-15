@@ -352,12 +352,12 @@ def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
 
     # TSLB 3D array
     tslbArr = numpy.array(zs)*-5.52 + 285.275        # Constant tslb with increasing depth by vertical level
-    if ic and (st := ic.get('surface_temp')) and ic.get("soil_temp_layer5") and (ic_layer_bots := ic.get('bots')):
+    if ic and (st := ic.get('surface_temp')) and ic.get("soil_temp_layer5") and (ic_layer_centers := ic.get('centers')):
         temps = [ic.get(f'soil_temp_layer{i}' for i in range(1,6))]
         if not all(temps):
             raise ValueError(f"Missing a soil temperature layer {temps=}")
         temps = [st, *temps]
-        tslbArr = numpy.interp(zs, ic_layer_bots, temps)
+        tslbArr = numpy.interp(zs, ic_layer_centers, temps)
     tslb = tslbArr[:, None, None] * numpy.ones(msk.shape)                       # Set the TSLB array across entire domain by vertical level. tslb = numpy.vstack([msk]*4)
 
     veg = ds_in['GREENFRAC'].data * 100.0                               # Green fraction as a percentage (0-100)
