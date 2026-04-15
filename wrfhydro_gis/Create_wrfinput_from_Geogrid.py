@@ -282,7 +282,7 @@ def main_wrfinput_ncdfpy(geoFile, wrfinFile, lai=8, outNCType='NETCDF4'):
     rootgrp_out.close()
     return
 
-def fill_wrfinput_xarray(ds_in, laimo=8):
+def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
     '''
     This function will populate the arrays in the WRFINPUT file based on array and
     attribute values in the input GEOGRID file.
@@ -343,11 +343,21 @@ def fill_wrfinput_xarray(ds_in, laimo=8):
     zs = [item/2 + sum(dzs[:num]) for num,item in enumerate(dzs)]               # Each center depth is half the layer thickness + sum of thicknesses of all levels above
 
     # Soil moisture SMOIS 3D array
-    smoisArr = numpy.array(zs)*0.05+0.1975                            # Constant soil moisture with increasing depth by vertical level
-    smois = smoisArr[:, None, None] * numpy.ones(msk.shape)                     # Set the soil moisture (SMOIS) array across entire domain by vertical level
+    smoisArr = numpy.array(zs)*0.05+0.1975  # Constant soil moisture with increasing depth by vertical level
+    ic = initial_conditions
+    if ic and ic.get('sm_surface') and ic.get('sm_rootzone'):
+        smoisArr[0] = initial_conditions['sm_surface']
+        smoisArr[1:] = initial_conditions['sm_rootzone']
+    smois = smoisArr[:, None, None] * numpy.ones(msk.shape)  # Set the soil moisture (SMOIS) array across entire domain by vertical level
 
     # TSLB 3D array
     tslbArr = numpy.array(zs)*-5.52 + 285.275        # Constant tslb with increasing depth by vertical level
+    if ic and (st := ic.get('surface_temp')) and ic.get("soil_temp_layer5") and (ic_layer_bots := ic.get('bots')):
+        temps = [ic.get(f'soil_temp_layer{i}' for i in range(1,6))]
+        if not all(temps):
+            raise ValueError(f"Missing a soil temperature layer {temps=}")
+        temps = [st, *temps]
+        tslbArr = numpy.interp(zs, ic_layer_bots, temps)
     tslb = tslbArr[:, None, None] * numpy.ones(msk.shape)                       # Set the TSLB array across entire domain by vertical level. tslb = numpy.vstack([msk]*4)
 
     veg = ds_in['GREENFRAC'].data * 100.0                               # Green fraction as a percentage (0-100)
@@ -355,22 +365,26 @@ def fill_wrfinput_xarray(ds_in, laimo=8):
     # Populate output WRFINPUT file variable arrays
     ds_in.variables['TMN'][:] = tmn                                       # Elevation adjusted deep soil temperature
     ds_in.variables['XLAND'][:] = msk                                     # Landmask (1=land, 2=water) from LU_INDEX
-    ds_in.variables['SEAICE'][:] = numpy.zeros(msk.shape)                 # zeros
+    ds_in.variables['SEAICE'][:] = numpy.zeros(msk.shape)                 # fraction of cell that is sea ice
     ds_in.variables['ISLTYP'][:] = soi                                    # Dominant soil type
     ds_in.variables['SHDMAX'][:] = veg.max(axis=1)                        # Maximum GREENFRAC over time dimesion
     ds_in.variables['SHDMIN'][:] = veg.min(axis=1)                        # Minimum GREENFRAC over time dimesion
     ds_in.variables['LAI'][:] = ds_in.variables['LAI12M'][:,laimo-1] # Leaf area index for the user-specified month
-    ds_in.variables['CANWAT'][:] = numpy.zeros(msk.shape)                 # zeros
-    ds_in.variables['SNOW'][:] = numpy.zeros(msk.shape)                   # zeros
-    ds_in.variables['TSK'][:] = numpy.zeros(msk.shape) + 290.0            # Constant value
-    ds_in.variables['SMOIS'][:] = smois[numpy.newaxis]                    # Add an axis to make this 4D (time, soil_layer_stag, south_north, west_east)
-    ds_in.variables['TSLB'][:] = tslb[numpy.newaxis]                      # Add an axis to make this 4D (time, soil_layer_stag, south_north, west_east)
+    ds_in.variables['CANWAT'][:] = numpy.zeros(msk.shape)                 # Canopy water storage kg/m^2
+    ds_in.variables['SNOW'][:] = numpy.zeros(msk.shape)                   # snow water equivelant kg/m^2
+    if ic and ic.get("snow_mass"):
+        ds_in.variables['SNOW'][:] = numpy.ones(msk.shape) * ic.get("snow_mass")
+    ds_in.variables['TSK'][:] = numpy.zeros(msk.shape) + 290.0            # Initial land temp K
+    if ic and ic.get('surface_temp'):
+        ds_in.variables['TSK'][:] = numpy.ones(msk.shape) * ic.get('surface_temp')
+    ds_in.variables['SMOIS'][:] = smois[numpy.newaxis]                    # 4D (time, soil_layer_stag, south_north, west_east) soil moisture
+    ds_in.variables['TSLB'][:] = tslb[numpy.newaxis]                      # 4D soil temperature
     ds_in.variables['ZS'][:] = numpy.array(zs)[numpy.newaxis]             # Depths of the center of each soil layer
     ds_in.variables['DZS'][:] = numpy.array(dzs)[numpy.newaxis]           # Thickness of each soil layer
     del msk, veg, iswater, isoilwater, soi, smois, smoisArr, tslb, tslbArr, tmn, zs
     return ds_in
 
-def main_wrfinput_xarray(geoFile, wrfinFile, lai=8, outNCType='NETCDF4'):
+def main_wrfinput_xarray(geoFile, wrfinFile, lai=8, outNCType='NETCDF4', initial_conditions=None):
     '''
     This function is designed to build the wrfinput file using the xarray library.
     '''
@@ -400,7 +414,7 @@ def main_wrfinput_xarray(geoFile, wrfinFile, lai=8, outNCType='NETCDF4'):
         newVars.append(varname)
 
     # Process and populate variables
-    ncDS = fill_wrfinput_xarray(ncDS, laimo=lai)
+    ncDS = fill_wrfinput_xarray(ncDS, laimo=lai, initial_conditions=initial_conditions)
 
     # Drop dimensions
     dropDims = [item for item in ncDS.dims if item not in keepDims]
