@@ -2071,8 +2071,8 @@ def WB_functions(rootgrp, indem, projdir, threshold, ovroughrtfac_val, retdeprtf
             print('        Depression Breaching algorithm: Whitebox Breach Depressions Least Cost (Lindsay and Dhun, 2015).')
 
             # Breach Depressions Least Cost Options
-            fill_remaining = True                           # Optional flag indicating whether to fill any remaining unbreached depressions
-            dist = 100                                       # Undocumented parameter. Serach radius? Breach distance? 1000. Large numbers have a huge effect on processing time
+            fill_remaining = False                           # Optional flag indicating whether to fill any remaining unbreached depressions
+            dist = 2                                       # Undocumented parameter. Serach radius? Breach distance? 1000. Large numbers have a huge effect on processing time
             min_dist_bool = True                            # Optional flag indicating whether to minimize breach distances
             max_cost_val = None                             # Optional maximum breach cost (default is Inf) (None)
 
