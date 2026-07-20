@@ -1949,6 +1949,38 @@ def force_edges_off_grid(fd_arr, ignore_vals=[]):
         print('    Could not corece all 0-value flow direction cells to flow off of the grid.')
     return fd_arr_out
 
+def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_depth=0.05, agg=gdal.GRA_Max):
+    """
+    Burn in closed depressions when going from higher resolution (fine) to lower resolution (coarse) DEMs.
+    Fixes issues where warping grid to WRF-Hydro domain erases them pre-depression breaching."""
+
+    tic = time.time()
+    print('     Preserving depressions...')
+    wbt = WhiteboxTools()
+    wbt.work_dir = projdir
+    wbt.verbose = False
+
+    depth_fine = "fine_sink_depth.tif"
+    wbt.depth_in_sink(fine_dem, depth_fine, zero_background=True) # Get depths of pits on fine DEM
+
+    # Warp fine sink depths to routing domain and prep
+    depth_ds = gdal.Open(os.path.join(projdir, depth_fine))
+    depth_rt = fine_grid.project_to_model_grid(depth_ds, resampling=agg) # select maximum depth for burn-in
+    burn = depth_rt.GetRasterBand(1).ReadAsArray().astype('float32')
+    burn[~numpy.isfinite(burn)] = 0.0
+    burn[burn < min_depth] = 0.0
+
+    # Burn in in-place
+    dem_ds = gdal.Open(coarse_dem, gdal.GA_Update)
+    band = dem_ds.GetRasterBand(1)
+    band.WriteArray(band.ReadAsArray() - burn)
+    band.FlushCache()
+    dem_ds = depth_ds = depth_rt = None
+
+    print("     Burned {0} depression cells (> {1}m) in {2: 3.2f}s".format(int((burn > 0).sum()), min_depth, time.time()-tic))
+    return coarse_dem
+
+
 def WB_functions(rootgrp, indem, projdir, threshold, ovroughrtfac_val, retdeprtfac_val, lksatfac_val, sink=False, startPts=None, chmask=None):
     """
     This function is intended to produce the hydroglocial DEM corrections and derivitive

@@ -177,7 +177,8 @@ def GEOGRID_STANDALONE(inGeogrid,
                         retdeprtfac_val = 1.0,
                         lksatfac_val = 1000.0,
                         startPts = None,
-                        channel_mask = None):
+                        channel_mask = None,
+                        preserve_depressions = True): # Burn-in when going from higher res DEM than domain
     '''
     This function will validate input parameters and attempt to run the full routing-
     stack GIS pre-processing for WRF-Hydro. The inputs will be related to the domain,
@@ -240,6 +241,11 @@ def GEOGRID_STANDALONE(inGeogrid,
     outDEM = os.path.join(projdir, mosprj_name)
     mosprj = fine_grid.project_to_model_grid(in_DEM, saveRaster=True, OutGTiff=outDEM, resampling=gdal.GRA_Bilinear)
     in_DEM = mosprj = None
+
+    # Burn-in closed depressions that were erased during warping.
+    if preserve_depressions:
+        min_depression_depth = 0.05
+        wrfh.preserve_fine_depressions(inDEM, outDEM, fine_grid, projdir, min_depth=min_depression_depth)
 
     # Build latitude and longitude arrays for Fulldom_hires netCDF file
     if coordMethod1:
