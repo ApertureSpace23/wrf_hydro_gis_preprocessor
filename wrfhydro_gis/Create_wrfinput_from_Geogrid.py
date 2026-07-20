@@ -345,9 +345,10 @@ def fill_wrfinput_xarray(ds_in, laimo=8, initial_conditions=None):
     # Soil moisture SMOIS 3D array
     smoisArr = numpy.array(zs)*0.05+0.1975  # Constant soil moisture with increasing depth by vertical level
     ic = initial_conditions
-    if ic and ic.get('sm_surface') is not None and ic.get('sm_rootzone') is not None:
+    if ic and ic.get('sm_surface') is not None and ic.get('sm_rootzone') is not None and ic.get('sm_profile') is not None:
         smoisArr[0] = initial_conditions['sm_surface']
-        smoisArr[1:] = initial_conditions['sm_rootzone']
+        smoisArr[1:-1] = initial_conditions['sm_rootzone']
+        smoisArr[-1] = initial_conditions['sm_profile']
     smois = smoisArr[:, None, None] * numpy.ones(msk.shape)  # Set the soil moisture (SMOIS) array across entire domain by vertical level
 
     # TSLB 3D array
