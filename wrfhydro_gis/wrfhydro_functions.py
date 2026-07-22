@@ -1949,7 +1949,7 @@ def force_edges_off_grid(fd_arr, ignore_vals=[]):
         print('    Could not corece all 0-value flow direction cells to flow off of the grid.')
     return fd_arr_out
 
-def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_depth=0.05, agg=gdal.GRA_Max):
+def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_depth=0.05, max_cells=20, agg=gdal.GRA_Max):
     """
     Burn in closed depressions when going from higher resolution (fine) to lower resolution (coarse) DEMs.
     Fixes issues where warping grid to WRF-Hydro domain erases them pre-depression breaching.
@@ -1975,20 +1975,45 @@ def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_dept
     # Depressions on coarse grid
     coarse_sink = "coarse_sink_depth.tif"
     wbt.depth_in_sink(coarse_dem, coarse_sink, zero_background=True)
-    coarse_depth = gdal.Open(os.path.join(projdir, coarse_sink)).GetRasterBand(1).ReadAsArray().astype('float32')
+    coarse_ds = gdal.Open(os.path.join(projdir, coarse_sink))
+    coarse_depth = coarse_ds.GetRasterBand(1).ReadAsArray().astype('float32')
     coarse_depth[~numpy.isfinite(coarse_depth)] = 0.0
 
-    # Burn in in-place
+    # Burn in
     burn = numpy.maximum(0.0, fine_depth - coarse_depth) # Only deepen to fine_depth to not overdeepen
     burn[burn < min_depth] = 0.0
 
+    ## Only burn-in small depressions to not overdeepen ones that are already in the coarse DEM
+    from scipy import ndimage
+    if max_cells is not None:
+        labels, n = ndimage.label(burn > 0, structure=numpy.ones((3,3), dtype=int)) # all ones structure includes cells on the diagonal
+        comp_size = numpy.bincount(labels.ravel())
+        big = numpy.where(comp_size > max_cells)[0]
+        big = big[big != 0] # Exclude depth background which is set to zero
+        if big.size:
+            burn[numpy.isin(labels, big)] = 0.0
+
+    ## Burn in in-place
     dem_ds = gdal.Open(coarse_dem, gdal.GA_Update)
     band = dem_ds.GetRasterBand(1)
     band.WriteArray(band.ReadAsArray() - burn)
     band.FlushCache()
-    dem_ds = depth_ds = depth_rt = None
 
-    print("     Burned {0} depression cells (> {1}m deficit) in {2: 3.2f}s".format(int((burn > 0).sum()), min_depth, time.time()-tic))
+    # Create a mask that protects small depressions from breaching.
+    # This is applied after the breach step in WB_functions
+    protect = ndimage.binary_dilation(burn > 0, iterations=1).astype('uint8') # Dilate to protect the edge
+    pm = gdal.GetDriverByName('GTiff').Create(os.path.join(projdir, 'protect_mask.tif'),
+                                              dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Byte)
+    pm.SetGeoTransform(dem_ds.GetGeoTransform())
+    pm.SetProjection(dem_ds.GetProjection())
+    pm.GetRasterBand(1).WriteArray(protect)
+    pm.FlushCache()
+    pm = None
+    dem_ds = depth_ds = depth_rt = coarse_ds = None
+
+    print("     Burned {0} depression cells (> {1}m deficit), {2} protect cells, in {3: 3.2f}s".format(
+        int((burn > 0).sum()), min_depth, int(protect.sum()), time.time()-tic))
+
     return coarse_dem
 
 
@@ -2146,6 +2171,21 @@ def WB_functions(rootgrp, indem, projdir, threshold, ovroughrtfac_val, retdeprtf
                 fill_depressions,
                 fix_flats=fix_flats,
                 flat_increment=flat_increment)
+
+        # Restore small closed depressions post-breaching
+        protect_path = os.path.join(projdir, 'protect_mask.tif')
+        if os.path.exists(protect_path): # Only created if preserve_depressions is on
+            br_ds = gdal.Open(os.path.join(projdir, fill_depressions), gdal.GA_Update)
+            pre_ds = gdal.Open(indem)  # pre-breach burned in DEM
+            mask_ds = gdal.Open(protect_path)
+            br = br_ds.GetRasterBand(1).ReadAsArray()
+            pre = pre_ds.GetRasterBand(1).ReadAsArray()
+            mask = mask_ds.GetRasterBand(1).ReadAsArray().astype(bool)
+            br[mask] = pre[mask]
+            br_ds.GetRasterBand(1).WriteArray(br)
+            br_ds.FlushCache()
+            br_ds = pre_ds = mask_ds = None
+            print('        Restored {0} protected pothole cells after depression treatment.'.format(int(mask.sum())))
 
         if fill_depth_raster:
             # Create a fill depth raster for diagnostic purposes
