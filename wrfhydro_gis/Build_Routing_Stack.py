@@ -179,7 +179,8 @@ def GEOGRID_STANDALONE(inGeogrid,
                         startPts = None,
                         channel_mask = None,
                         preserve_depressions = False, # Burn-in when going from higher res DEM than domain
-                        max_size_preserved_depressions = 20): # Maximum size of preserved depression for burn-in
+                        max_size_preserved_depressions = 20, # Maximum size of preserved depression for burn-in
+                        fill_single_cell_pits = False): # Remove single-cell pits on the 10m DEM prior to burn-in
     '''
     This function will validate input parameters and attempt to run the full routing-
     stack GIS pre-processing for WRF-Hydro. The inputs will be related to the domain,
@@ -246,7 +247,13 @@ def GEOGRID_STANDALONE(inGeogrid,
     # Burn-in closed depressions that were erased during warping.
     if preserve_depressions:
         min_depression_depth = 0.05
-        wrfh.preserve_fine_depressions(inDEM, outDEM, fine_grid, projdir, min_depth=min_depression_depth, max_cells=max_size_preserved_depressions)
+        wrfh.preserve_fine_depressions(inDEM,
+                                       outDEM,
+                                       fine_grid,
+                                       projdir,
+                                       min_depth=min_depression_depth,
+                                       max_cells=max_size_preserved_depressions,
+                                       fill_single_cell_pits=fill_single_cell_pits)
 
     # Build latitude and longitude arrays for Fulldom_hires netCDF file
     if coordMethod1:

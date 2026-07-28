@@ -1949,12 +1949,25 @@ def force_edges_off_grid(fd_arr, ignore_vals=[]):
         print('    Could not corece all 0-value flow direction cells to flow off of the grid.')
     return fd_arr_out
 
-def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_depth=0.05, max_cells=20, agg=gdal.GRA_Max):
+def preserve_fine_depressions(fine_dem,
+                              coarse_dem,
+                              fine_grid,
+                              projdir,
+                              min_depth=0.05,
+                              max_cells=20,
+                              agg=gdal.GRA_Max,
+                              fill_single_cell_pits=False,
+                              protect_buffer=2):
     """
     Burn in closed depressions when going from higher resolution (fine) to lower resolution (coarse) DEMs.
     Fixes issues where warping grid to WRF-Hydro domain erases them pre-depression breaching.
     
-    Prevent overdeepening issues by comparing resampled fine depressions to coarse depressions
+    Prevent overdeepening issues by comparing resampled fine depressions to coarse depressions.
+
+    Option 'fill_single_cell_pits' will fill single cell noise pixels on the fine DEM before any step.
+
+    Option protect_buffer sets the distance to add burned-in features back after breach step.
+        This needs to match the breach dist.
     """
 
     tic = time.time()
@@ -1963,6 +1976,10 @@ def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_dept
     wbt.work_dir = projdir
     wbt.verbose = False
 
+    # Optionally remove single-cell pits from the fine DEM
+    if fill_single_cell_pits:
+        wbt.fill_single_cell_pits(fine_dem, "fine_nopits.tif")
+        fine_dem = os.path.join(projdir, "fine_nopits.tif")
 
     # Get fine sinks and warp to routing domain
     depth_fine = "fine_sink_depth.tif"
@@ -2001,7 +2018,7 @@ def preserve_fine_depressions(fine_dem, coarse_dem, fine_grid, projdir, min_dept
 
     # Create a mask that protects small depressions from breaching.
     # This is applied after the breach step in WB_functions
-    protect = ndimage.binary_dilation(burn > 0, iterations=1).astype('uint8') # Dilate to protect the edge
+    protect = ndimage.binary_dilation(burn > 0, iterations=protect_buffer).astype('uint8') # Dilate to protect the edge
     pm = gdal.GetDriverByName('GTiff').Create(os.path.join(projdir, 'protect_mask.tif'),
                                               dem_ds.RasterXSize, dem_ds.RasterYSize, 1, gdal.GDT_Byte)
     pm.SetGeoTransform(dem_ds.GetGeoTransform())
