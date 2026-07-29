@@ -1957,7 +1957,10 @@ def preserve_fine_depressions(fine_dem,
                               max_cells=20,
                               agg=gdal.GRA_Max,
                               fill_single_cell_pits=False,
-                              protect_buffer=2):
+                              protect_buffer=2,
+                              streams=None,
+                              reject_flowline_components=False,
+                              flowline_buffer=1):
     """
     Burn in closed depressions when going from higher resolution (fine) to lower resolution (coarse) DEMs.
     Fixes issues where warping grid to WRF-Hydro domain erases them pre-depression breaching.
@@ -1966,8 +1969,11 @@ def preserve_fine_depressions(fine_dem,
 
     Option 'fill_single_cell_pits' will fill single cell noise pixels on the fine DEM before any step.
 
-    Option protect_buffer sets the distance to add burned-in features back after breach step.
+    Option 'protect_buffer' sets the distance to add burned-in features back after breach step.
         This needs to match the breach dist.
+
+    Option 'streams' is a shapefile/geojson with streams to reject burnin on if 'reject_flowline_components"
+    is enabled. Associated is 'flowline_buffer' which is the number of pixels away to check for burnin.
     """
 
     tic = time.time()
@@ -2009,6 +2015,30 @@ def preserve_fine_depressions(fine_dem,
         big = big[big != 0] # Exclude depth background which is set to zero
         if big.size:
             burn[numpy.isin(labels, big)] = 0.0
+    
+    ## Reject whole burn depressions that sit on a mapped stream
+    if streams is not None and reject_flowline_components:
+        # rasterize flowlines on the fine sink-depth grid (streams share that CRS), warp to the coarse grid
+        fds = depth_ds #gdal.Open(os.path.join(projdir, depth_fine))
+        flf = os.path.join(projdir, 'flowline_fine.tif')
+        fm = gdal.GetDriverByName('GTiff').Create(flf, fds.RasterXSize, fds.RasterYSize, 1, gdal.GDT_Byte)
+        fm.SetGeoTransform(fds.GetGeoTransform())
+        fm.SetProjection(fds.GetProjection())
+        svec = ogr.Open(streams)
+        gdal.RasterizeLayer(fm, [1], svec.GetLayer(0), burn_values=[1])
+        fm.FlushCache()
+        fm = fds = None
+        fl_rt = fine_grid.project_to_model_grid(gdal.Open(flf), resampling=gdal.GRA_Max)
+        coarse_fl = numpy.nan_to_num(fl_rt.GetRasterBand(1).ReadAsArray()) > 0
+        if flowline_buffer:
+            coarse_fl = ndimage.binary_dilation(coarse_fl, iterations=flowline_buffer)
+        labels2, n2 = ndimage.label(burn > 0, structure=numpy.ones((3,3), dtype=int))
+        hit = numpy.unique(labels2[coarse_fl & (labels2 > 0)])
+        hit = hit[hit != 0]
+        if hit.size:
+            burn[numpy.isin(labels2, hit)] = 0.0
+        print("     Flowline reject: dropped {0} burn depressions coincident with mapped streams".format(int(hit.size)))
+        svec = fl_rt = None
 
     ## Burn in in-place
     dem_ds = gdal.Open(coarse_dem, gdal.GA_Update)

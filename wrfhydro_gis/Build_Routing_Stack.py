@@ -180,7 +180,9 @@ def GEOGRID_STANDALONE(inGeogrid,
                         channel_mask = None,
                         preserve_depressions = False, # Burn-in when going from higher res DEM than domain
                         max_size_preserved_depressions = 20, # Maximum size of preserved depression for burn-in
-                        fill_single_cell_pits = False): # Remove single-cell pits on the 10m DEM prior to burn-in
+                        fill_single_cell_pits = False, # Remove single-cell pits on the 10m DEM prior to burn-in
+                        streams = None, # Line vector (fine-DEM CRS) of mapped flowlines
+                        reject_flowline_components = False): # Drop burn depressions that sit on a flowline
     '''
     This function will validate input parameters and attempt to run the full routing-
     stack GIS pre-processing for WRF-Hydro. The inputs will be related to the domain,
@@ -253,7 +255,9 @@ def GEOGRID_STANDALONE(inGeogrid,
                                        projdir,
                                        min_depth=min_depression_depth,
                                        max_cells=max_size_preserved_depressions,
-                                       fill_single_cell_pits=fill_single_cell_pits)
+                                       fill_single_cell_pits=fill_single_cell_pits,
+                                       streams=streams,
+                                       reject_flowline_components=reject_flowline_components)
 
     # Build latitude and longitude arrays for Fulldom_hires netCDF file
     if coordMethod1:
