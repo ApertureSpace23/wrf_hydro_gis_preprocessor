@@ -2063,6 +2063,361 @@ def preserve_fine_depressions(fine_dem,
 
     return coarse_dem
 
+def _drainage_carve(work, gated, dist, cap, EPS=1.0e-3, min_slope=1.0e-3):
+    '''Monotonic, capped, pure-lowering carve of the gated stream cells that ALSO sinks each channel cell
+    just below its lowest OFF-channel neighbor. Two constraints per cell, processed outlet-last (upstream
+    first) so downstream cells are set below their upstream channel neighbor:
+      (1) descent      : enf <= min(upstream channel enf) - EPS   -> a monotone thalweg toward the outlet
+      (2) local-low    : enf <= min(off-channel work) - EPS       -> the channel is the local minimum, so
+                                                                     D8 stays IN it instead of diverting to a
+                                                                     lower adjacent off-stream cell
+    Both are clamped to work - cap (no cell lowered more than <cap> m below its original), so a reach whose
+    off-channel terrain sits >cap below it can still leak - raise cap if a mapped river needs it. Off-channel
+    cells are NEVER lowered, so off-stream depressions are preserved; a pond next to the channel simply spills
+    into it once full (correct hydrology). Constraint (2) is what makes flow accumulation (hence the
+    flow-accumulation-derived CHANNELGRID) follow the mapped reach; descent alone (the old behavior) drained
+    on-channel sinks but let D8 leave the channel wherever an off-stream neighbor was lower.
+
+    Finally a min-gradient pass (3) guarantees a STRICTLY descending thalweg. On a flat reach constraints
+    (1)+(2) both floor to work - cap, so the channel comes out FLAT (equal elevations) and D8/breach cannot
+    route it -> residual pits along the reach. Pass (3) walks upstream-first and
+    forces each cell at least <min_slope> m below its lowest upstream channel neighbour, overriding the cap
+    where needed. It only ever LOWERS channel cells, so the off-stream / local-low guarantees still hold; the
+    extra depth beyond the cap is bounded by min_slope * (reach length) and only bites where the reach was
+    flat, so it never trenches an already-descending steep reach.'''
+    H, W = work.shape
+    N8 = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    enf = work.copy()
+    order = sorted(numpy.argwhere(gated).tolist(), key=lambda rc: -dist[rc[0], rc[1]])
+    for r, i in order:
+        if dist[r, i] < 0:
+            continue
+        reqs = []
+        up = [enf[r+dr, i+di] for dr, di in N8
+              if 0 <= r+dr < H and 0 <= i+di < W and gated[r+dr, i+di] and dist[r+dr, i+di] > dist[r, i]]
+        if up:
+            reqs.append(min(up) - EPS)                      # (1) descend below the upstream channel
+        off = [work[r+dr, i+di] for dr, di in N8
+               if 0 <= r+dr < H and 0 <= i+di < W and not gated[r+dr, i+di]]
+        if off:
+            reqs.append(min(off) - EPS)                     # (2) sit below off-channel terrain (keep D8 in-channel)
+        if reqs:
+            enf[r, i] = max(min(work[r, i], min(reqs)), work[r, i] - cap)
+    for r, i in (order if min_slope > 0 else []):           # (3) strictly descending thalweg (min-gradient)
+        if dist[r, i] < 0:
+            continue
+        up = [enf[r+dr, i+di] for dr, di in N8
+              if 0 <= r+dr < H and 0 <= i+di < W and gated[r+dr, i+di] and dist[r+dr, i+di] > dist[r, i]]
+        if up:
+            enf[r, i] = min(enf[r, i], min(up) - min_slope)  # override the cap only where the reach was flat
+    return enf
+
+
+def filter_streams_min_arbolatesu(streams, projdir, min_arbolatesu, out_name='streams_arbfilt.shp'):
+    '''Drop reaches whose NHDPlus arbolatesu (cumulative upstream stream km) is below min_arbolatesu, so the
+    flowline reject and the channel carve act ONLY on reaches carrying real accumulated flow. This preserves the
+    finest top-of-network source ponds/wetlands (a mapped reach with almost no drainage above it) that the carve
+    would otherwise drain into a channel. ftype-agnostic (a sub-threshold 460 StreamRiver is treated as a
+    preservable pond, deliberately overriding NHD's flowing-river class.
+    Reaches with a NULL/missing arbolatesu are KEPT (cannot be judged). Returns the
+    filtered vector path in projdir, or the original streams unchanged if it carries no arbolatesu field.'''
+    src = ogr.Open(streams)
+    lyr = src.GetLayer(0)
+    ldef = lyr.GetLayerDefn()
+    fi = {ldef.GetFieldDefn(k).GetName().lower(): k for k in range(ldef.GetFieldCount())}
+    if 'arbolatesu' not in fi:
+        print("     Arbolatesu floor: streams carry no arbolatesu field; skipping filter.")
+        src = None
+        return streams
+    out_path = os.path.join(projdir, out_name)
+    drv = ogr.GetDriverByName('ESRI Shapefile')
+    if os.path.exists(out_path):
+        drv.DeleteDataSource(out_path)
+    dst = drv.CreateDataSource(out_path)
+    dlyr = dst.CreateLayer(lyr.GetName(), lyr.GetSpatialRef(), lyr.GetGeomType())
+    for k in range(ldef.GetFieldCount()):
+        dlyr.CreateField(ldef.GetFieldDefn(k))
+    ai = fi['arbolatesu']
+    kept = dropped = 0
+    lyr.ResetReading()
+    for feat in lyr:
+        a = feat.GetField(ai)
+        if a is not None and a < min_arbolatesu:
+            dropped += 1
+            continue
+        dlyr.CreateFeature(feat)
+        kept += 1
+    dst = src = None
+    print("     Arbolatesu floor {0} km: kept {1} reaches, dropped {2} (upstream length < floor)".format(
+        min_arbolatesu, kept, dropped))
+    return out_path
+
+
+def carve_stream_channels(fine_dem, coarse_dem, fine_grid, projdir, streams,
+                          cap=5.0, gate_thresh=0.02, flowline_buffer=0, agg=gdal.GRA_Max):
+    """
+    Drain the warp-origin on-channel depressions that reject_flowline_components cannot touch.
+
+    Those sinks live in the warped coarse DEM itself (not created by burn-in), so the reject
+    leaves them, and the dist=2 least-cost breach can't resolve them on a
+    near-flat valley. Here, along mapped streams, carve a monotonic descent on the coarse DEM so the channel
+    drains. Pure lowering: off-stream cells are untouched, and because the channel then descends it is not a
+    depression, so the downstream breach in WB_functions leaves it in place.
+
+      GATED   : only stream connected-components that contain an on-channel depression (coarse depth_in_sink
+                > gate_thresh on a stream cell) are carved, so well-drained streams are left alone.
+      CAPPED  : no cell is lowered more than 'cap' m, so a flat/steep reach can't gouge a runaway trench.
+
+    streams: line vector (NHD flowlines minus waterbodies) IN THE FINE DEM's CRS (same as the reject).
+    """
+    from collections import deque
+    from scipy import ndimage
+    tic = time.time()
+    wbt = WhiteboxTools()
+    wbt.work_dir = projdir
+    wbt.verbose = False
+    EPS = 1.0e-3
+    N8 = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+
+    # coarse stream mask: rasterize flowlines on the fine grid (streams share that CRS), warp GRA_Max to coarse
+    fds = gdal.Open(fine_dem)
+    flf = os.path.join(projdir, 'flowline_fine_carve.tif')
+    fm = gdal.GetDriverByName('GTiff').Create(flf, fds.RasterXSize, fds.RasterYSize, 1, gdal.GDT_Byte)
+    fm.SetGeoTransform(fds.GetGeoTransform())
+    fm.SetProjection(fds.GetProjection())
+    svec = ogr.Open(streams)
+    gdal.RasterizeLayer(fm, [1], svec.GetLayer(0), burn_values=[1], options=["ALL_TOUCHED=TRUE"])
+    fm.FlushCache()
+    fm = fds = svec = None
+    fl_rt = fine_grid.project_to_model_grid(gdal.Open(flf), resampling=agg)
+    stream = numpy.nan_to_num(fl_rt.GetRasterBand(1).ReadAsArray()) > 0
+    fl_rt = None
+    if flowline_buffer:  # default 0: carve only the channel cells (widening risks draining near-channel potholes)
+        stream = ndimage.binary_dilation(stream, iterations=flowline_buffer)
+
+    # gate: keep only stream components sitting in a coarse closed depression (current, post-burn DEM)
+    coarse_sink = "coarse_sink_carve.tif"
+    wbt.depth_in_sink(coarse_dem, coarse_sink, zero_background=True)
+    cds_ds = gdal.Open(os.path.join(projdir, coarse_sink))
+    cds = cds_ds.GetRasterBand(1).ReadAsArray().astype('float32'); cds_ds = None
+    cds = numpy.where(numpy.isfinite(cds), cds, 0.0)
+    labels, n = ndimage.label(stream, structure=numpy.ones((3,3), dtype=int))
+    keep = numpy.unique(labels[stream & (cds > gate_thresh)]); keep = keep[keep != 0]
+    gated = (numpy.isin(labels, keep) & stream) if keep.size else numpy.zeros_like(stream)
+    if not gated.any():
+        print("     Channel burn: no gated stream reach with an on-channel sink; nothing carved in {0: 3.2f}s".format(time.time()-tic))
+        return coarse_dem
+
+    # BFS distance-to-outlet along each gated reach, then monotonic (capped) carve toward the outlet
+    dem_ds = gdal.Open(coarse_dem, gdal.GA_Update)
+    band = dem_ds.GetRasterBand(1)
+    dem = band.ReadAsArray().astype('float64')
+    H, W = dem.shape
+    valid = dem > -1.0e4
+    work = numpy.where(valid, dem, dem[valid].max() if valid.any() else 0.0)
+    glab, gn = ndimage.label(gated, structure=numpy.ones((3,3), dtype=int))
+    dist = numpy.full((H, W), -1, dtype=int)
+    dq = deque()
+    for c in range(1, gn+1):
+        cells = numpy.argwhere(glab == c)
+        # Seed a SINGLE pour point per reach: the lowest-elevation border cell (or the lowest cell
+        # if the reach never reaches the domain edge). Seeding *all* border cells makes a
+        # through-flowing reach that clips the edge at many points get one outlet per touch, so the
+        # BFS fronts collide and the monotonic carve slices it into segments draining to different
+        # edges (broken flow accumulation). One pour point => one continuous descent.
+        border = [(r, i) for r, i in cells if r == 0 or r == H-1 or i == 0 or i == W-1]
+        pool = border if border else cells.tolist()
+        seeds = [tuple(min(pool, key=lambda rc: work[rc[0], rc[1]]))]
+        for r, i in seeds:
+            if dist[r, i] < 0:
+                dist[r, i] = 0; dq.append((r, i))
+    while dq:
+        r, i = dq.popleft()
+        for dr, di in N8:
+            nr, ni = r+dr, i+di
+            if 0 <= nr < H and 0 <= ni < W and gated[nr, ni] and dist[nr, ni] < 0:
+                dist[nr, ni] = dist[r, i] + 1; dq.append((nr, ni))
+    enf = _drainage_carve(work, gated, dist, cap)
+    carved = dem.copy()
+    carved[gated] = enf[gated]
+    band.WriteArray(carved)
+    band.FlushCache()
+    maxcarve = float(numpy.where(valid, dem - carved, 0.0).max())
+    dem_ds = None
+    print("     Channel burn: carved {0} stream cells in {1} gated reach(es); max carve {2:.2f} m (cap {3} m) in {4: 3.2f}s".format(
+        int(gated.sum()), int(keep.size), maxcarve, cap, time.time()-tic))
+    return coarse_dem
+
+
+def topological_stream_carve(fine_dem, coarse_dem, fine_grid, projdir, streams,
+                             cap=5.0, gate_thresh=0.02, agg=gdal.GRA_Max):
+    """
+    Topology-seeded stream carve: a variant of carve_stream_channels that seeds the monotonic capped descent
+    from each reach's true OUTLET (from NHDPlus network topology) instead of from the lowest domain-border
+    cell. This is similar to WhiteboxTools' TopologicalBreachBurn (in that it uses the mapped network's
+    topology to set flow direction) but WITHOUT its depression fill or deep routing-burn: we keep pure
+    lowering + the <cap> m cap, so off-stream depressions are preserved and TOPOGRAPHY stays physical.
+
+    Outlets are found from tonode/fromnode: within an 8-connected stream component, a reach is an outlet if
+    its downstream node (tonode) is not the upstream node (fromnode) of any reach in that component - i.e.
+    nothing downstream of it remains in the domain. This fixes the cases the lowest-border seeding gets wrong:
+      (a) a reach that clips the domain edge at many points (one true outlet, not one seed per touch -> no
+          false interior divides);
+      (b) a warped coarse DEM whose gradient disagrees with the mapped flow direction (the outlet is
+          topological, not the DEM low);
+      (c) two distinct networks merged into one raster component (each keeps its own outlet).
+    arbolatesu (= UpstreamCumulativeStreamKm = TUCL) breaks ties / picks the exit cell.
+
+    'streams' must carry the NHDPlus VAA written by fetch_nhd (arbolatesu, tonode, fromnode). If those fields
+    are absent the function defers to carve_stream_channels (elevation/lowest-border seeding). Gate and pure-
+    lowering cap are identical to carve_stream_channels; only the SEED set differs.
+
+    NOTE (coarse-grid approximation): arbolatesu/tonode/fromnode are rasterized on the fine grid then warped
+    GRA_Max to the model grid, so at a coarse cell straddling two reaches the max value wins - a minor edge
+    effect at junctions.
+    """
+    
+    from collections import deque
+    from scipy import ndimage
+    tic = time.time()
+    wbt = WhiteboxTools()
+    wbt.work_dir = projdir
+    wbt.verbose = False
+    EPS = 1.0e-3
+    N8 = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+
+    # Require the topology fields; otherwise defer to the elevation-seeded carve.
+    svec = ogr.Open(streams)
+    lyr = svec.GetLayer(0)
+    ldef = lyr.GetLayerDefn()
+    have = {ldef.GetFieldDefn(k).GetName().lower() for k in range(ldef.GetFieldCount())}
+    svec = lyr = None
+    need = {"arbolatesu", "tonode", "fromnode"}
+    if not need.issubset(have):
+        print("     Topological carve: streams lack {0}; deferring to carve_stream_channels.".format(sorted(need - have)))
+        return carve_stream_channels(fine_dem, coarse_dem, fine_grid, projdir, streams,
+                                     cap=cap, gate_thresh=gate_thresh, agg=agg)
+
+    # Rasterize ONE per-reach RANK (ordinal by arbolatesu) on the fine grid, warp GRA_Max to the model grid so
+    # the most-downstream reach wins per coarse cell, then LOOK UP (arbolatesu, tonode, fromnode) from that one
+    # reach. This keeps the three fields mutually consistent per cell and never takes the max of categorical node
+    # IDs (warping tonode/fromnode independently with GRA_Max scrambles the topology -> spurious outlets).
+    fds = gdal.Open(fine_dem)
+    sv = ogr.Open(streams)
+    slyr = sv.GetLayer(0)
+    sdef = slyr.GetLayerDefn()
+    fidx = {sdef.GetFieldDefn(k).GetName().lower(): k for k in range(sdef.GetFieldCount())}
+    def _fval(feat, nm):
+        v = feat.GetField(fidx[nm])
+        return float(v) if v is not None else 0.0
+    reaches = []
+    for feat in slyr:
+        geom = feat.GetGeometryRef()
+        if geom is None:
+            continue
+        reaches.append((_fval(feat, "arbolatesu"), _fval(feat, "tonode"), _fval(feat, "fromnode"), geom.Clone()))
+    slyr.ResetReading()
+    order = sorted(range(len(reaches)), key=lambda k: reaches[k][0])   # ascending arbolatesu -> rank
+    # rank-indexed lookup tables (rank 0 = background/no-stream)
+    arb = numpy.array([0.0] + [reaches[k][0] for k in order], dtype='float64')
+    ton = numpy.array([0.0] + [reaches[k][1] for k in order], dtype='float64')
+    frm = numpy.array([0.0] + [reaches[k][2] for k in order], dtype='float64')
+    rank_of = {k: rk for rk, k in enumerate(order, start=1)}
+    # in-memory layer carrying the rank, rasterized on the fine grid
+    memds = ogr.GetDriverByName('MEMORY').CreateDataSource('tcarve_rank')
+    memlyr = memds.CreateLayer('r', slyr.GetSpatialRef(), ogr.wkbUnknown)
+    memlyr.CreateField(ogr.FieldDefn('rk', ogr.OFTInteger))
+    for k, (_a, _t, _f, geom) in enumerate(reaches):
+        nf = ogr.Feature(memlyr.GetLayerDefn())
+        nf.SetField('rk', rank_of[k])
+        nf.SetGeometry(geom)
+        memlyr.CreateFeature(nf)
+    tmp = os.path.join(projdir, 'tcarve_rank.tif')
+    d = gdal.GetDriverByName('GTiff').Create(tmp, fds.RasterXSize, fds.RasterYSize, 1, gdal.GDT_Float64)
+    d.SetGeoTransform(fds.GetGeoTransform())
+    d.SetProjection(fds.GetProjection())
+    d.GetRasterBand(1).SetNoDataValue(0.0)
+    gdal.RasterizeLayer(d, [1], memlyr, options=["ATTRIBUTE=rk", "ALL_TOUCHED=TRUE"])
+    d.FlushCache()
+    d = memds = sv = slyr = None
+    rrt = fine_grid.project_to_model_grid(gdal.Open(tmp), resampling=agg)   # GRA_Max: most-downstream reach wins
+    rank = numpy.nan_to_num(rrt.GetRasterBand(1).ReadAsArray())
+    rrt = fds = None
+    rank = numpy.clip(numpy.rint(rank).astype(int), 0, len(order))
+    tucl = arb[rank]                       # per-cell attributes, all from the winning (most-downstream) reach
+    tonode = ton[rank]
+    fromnode = frm[rank]
+    stream = rank > 0
+
+    # Gate: keep only stream components sitting in a coarse closed depression (same as carve_stream_channels).
+    wbt.depth_in_sink(coarse_dem, "coarse_sink_tcarve.tif", zero_background=True)
+    cds_ds = gdal.Open(os.path.join(projdir, "coarse_sink_tcarve.tif"))
+    cds = cds_ds.GetRasterBand(1).ReadAsArray().astype('float32'); cds_ds = None
+    cds = numpy.where(numpy.isfinite(cds), cds, 0.0)
+    labels, _ = ndimage.label(stream, structure=numpy.ones((3,3), dtype=int))
+    keep = numpy.unique(labels[stream & (cds > gate_thresh)]); keep = keep[keep != 0]
+    gated = (numpy.isin(labels, keep) & stream) if keep.size else numpy.zeros_like(stream)
+    if not gated.any():
+        print("     Topological carve: no gated reach with an on-channel sink; nothing carved in {0: 3.2f}s".format(time.time()-tic))
+        return coarse_dem
+
+    dem_ds = gdal.Open(coarse_dem, gdal.GA_Update)
+    band = dem_ds.GetRasterBand(1)
+    dem = band.ReadAsArray().astype('float64')
+    H, W = dem.shape
+    valid = dem > -1.0e4
+    work = numpy.where(valid, dem, dem[valid].max() if valid.any() else 0.0)
+    glab, gn = ndimage.label(gated, structure=numpy.ones((3,3), dtype=int))
+
+    # SEED = each component's outlet reach(es): a reach whose tonode is not a fromnode anywhere in the component
+    # (nothing downstream in-domain). For each distinct exit node, seed the reach's DOMAIN-EDGE cell (where flow
+    # actually leaves the tile) so the carve descends to the true exit; only if the outlet reach never reaches the
+    # border (an interior terminus / lake) fall back to its max-TUCL cell. If no topological exit is resolvable at
+    # all (coarse-grid degenerate), fall back to the component's max-TUCL (else lowest) cell.
+    border = numpy.zeros((H, W), dtype=bool)
+    border[0, :] = True; border[-1, :] = True; border[:, 0] = True; border[:, -1] = True
+    dist = numpy.full((H, W), -1, dtype=int)
+    dq = deque()
+    nseed = 0
+    for c in range(1, gn+1):
+        cm = (glab == c)
+        fromset = numpy.unique(fromnode[cm & (fromnode != 0)])
+        outlet = cm & (tonode != 0) & (~numpy.isin(tonode, fromset))
+        seedcells = []
+        if outlet.any():
+            for t in numpy.unique(tonode[outlet]):
+                m = outlet & (numpy.abs(tonode - t) < 0.5)
+                mb = m & border
+                if mb.any():
+                    seedcells.append(numpy.argwhere(mb)[0])            # domain-edge exit cell (flow leaves here)
+                else:
+                    idx = numpy.argwhere(m)
+                    if idx.size:
+                        seedcells.append(idx[tucl[m].argmax()])        # interior terminus / lake
+        else:
+            idx = numpy.argwhere(cm)
+            seedcells = [idx[tucl[cm].argmax()]] if idx.size else []
+        for r, i in seedcells:
+            if dist[r, i] < 0:
+                dist[r, i] = 0; dq.append((int(r), int(i))); nseed += 1
+
+    # BFS distance-to-outlet along gated cells, then monotonic (capped) pure-lowering carve toward the outlet.
+    while dq:
+        r, i = dq.popleft()
+        for dr, di in N8:
+            nr, ni = r+dr, i+di
+            if 0 <= nr < H and 0 <= ni < W and gated[nr, ni] and dist[nr, ni] < 0:
+                dist[nr, ni] = dist[r, i] + 1; dq.append((nr, ni))
+    enf = _drainage_carve(work, gated, dist, cap)
+    carved = dem.copy()
+    carved[gated] = enf[gated]
+    band.WriteArray(carved)
+    band.FlushCache()
+    maxcarve = float(numpy.where(valid, dem - carved, 0.0).max())
+    dem_ds = None
+    print("     Topological carve: carved {0} cells in {1} reach(es) from {2} topological outlet(s); max carve {3:.2f} m (cap {4} m) in {5: 3.2f}s".format(
+        int(gated.sum()), int(keep.size), nseed, maxcarve, cap, time.time()-tic))
+    return coarse_dem
 
 def WB_functions(rootgrp, indem, projdir, threshold, ovroughrtfac_val, retdeprtfac_val, lksatfac_val, sink=False, startPts=None, chmask=None):
     """

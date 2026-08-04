@@ -182,7 +182,11 @@ def GEOGRID_STANDALONE(inGeogrid,
                         max_size_preserved_depressions = 20, # Maximum size of preserved depression for burn-in
                         fill_single_cell_pits = False, # Remove single-cell pits on the 10m DEM prior to burn-in
                         streams = None, # Line vector (fine-DEM CRS) of mapped flowlines
-                        reject_flowline_components = False): # Drop burn depressions that sit on a flowline
+                        reject_flowline_components = False, # Drop burn depressions that sit on a flowline
+                        channel_burn = False, # Carve a monotonic descent along mapped streams on the 30m DEM
+                        channel_burn_cap = 5.0, # Max carve depth (m) for the channel burn (gated to sink reaches)
+                        topological_carve = False, # channel_burn seeded from NHDPlus topological outlets (needs VAA streams)
+                        min_carve_arbolatesu = 0.0): # Drop reaches with < this upstream stream-km (arbolatesu) before reject+carve, to preserve fine source ponds; 0 = off (0.5 recommended)
     '''
     This function will validate input parameters and attempt to run the full routing-
     stack GIS pre-processing for WRF-Hydro. The inputs will be related to the domain,
@@ -249,6 +253,12 @@ def GEOGRID_STANDALONE(inGeogrid,
     # Burn-in closed depressions that were erased during warping.
     if preserve_depressions:
         min_depression_depth = 0.05
+        # Arbolatesu floor: drop the finest top-of-network reaches (tiny upstream length) BEFORE both the
+        # flowline reject and the channel carve, so genuine source ponds/wetlands on them are preserved rather
+        # than drained. Applies to reject + carve alike (same streams vector). Needs VAA-bearing streams.
+        if min_carve_arbolatesu and streams is not None:
+            streams = wrfh.filter_streams_min_arbolatesu(streams, projdir, min_carve_arbolatesu)
+
         wrfh.preserve_fine_depressions(inDEM,
                                        outDEM,
                                        fine_grid,
@@ -258,6 +268,15 @@ def GEOGRID_STANDALONE(inGeogrid,
                                        fill_single_cell_pits=fill_single_cell_pits,
                                        streams=streams,
                                        reject_flowline_components=reject_flowline_components)
+
+        # Drain warp-origin on-channel sinks the reject can't touch: gated + capped channel burn on the 30m DEM.
+        # topological_carve is the same carve but seeded from NHDPlus network outlets (tonode/fromnode) instead
+        # of the lowest domain-border cell -- robust to reaches that exit the domain at more than one edge and to
+        # a warped gradient that disagrees with the mapped flow direction. Requires VAA-bearing streams.
+        if topological_carve and streams is not None:
+            wrfh.topological_stream_carve(inDEM, outDEM, fine_grid, projdir, streams, cap=channel_burn_cap)
+        elif channel_burn and streams is not None:
+            wrfh.carve_stream_channels(inDEM, outDEM, fine_grid, projdir, streams, cap=channel_burn_cap)
 
     # Build latitude and longitude arrays for Fulldom_hires netCDF file
     if coordMethod1:
